@@ -98,7 +98,7 @@ class DeformableTransformer_Det(nn.Module):
         normal_(self.level_embed)
 
     def get_proposal_pos_embed(self, proposals):
-        num_pos_feats = 256
+        num_pos_feats = 128
         temperature = 10000
         scale = 2 * math.pi
 
@@ -209,19 +209,24 @@ class DeformableTransformer_Det(nn.Module):
         output_memory, output_proposals = self.gen_encoder_output_proposals(memory, mask_flatten, spatial_shapes)
 
         enc_outputs_class = self.bbox_class_embed(output_memory)
-        print(self.bbox_embed(output_memory).shape,output_proposals.shape)
+        # print(self.bbox_embed(output_memory).shape,output_proposals.shape)
         enc_outputs_anchor_unact = self.bbox_embed(output_memory) + output_proposals
+        # print(enc_outputs_anchor_unact.shape)
 
         topk = self.num_proposals
         topk_proposals = torch.topk(enc_outputs_class[..., 0], topk, dim=1)[1]
-        topk_anchors_unact = torch.gather(enc_outputs_anchor_unact, 1, topk_proposals.unsqueeze(-1).repeat(1, 1, 1))
+        # print(topk_proposals.shape)
+        topk_anchors_unact = torch.gather(enc_outputs_anchor_unact, 1, topk_proposals.unsqueeze(-1).repeat(1, 1, 2))
         topk_anchors_unact = topk_anchors_unact.detach()
+        # print(topk_anchors_unact.shape)
         reference_points = topk_anchors_unact.sigmoid()[:, :, None, :]  # (bs, nq,1, 2)
 
         # positional queries
+        print(self.get_proposal_pos_embed(topk_anchors_unact).shape)
         query_pos = self.pos_trans_norm(self.pos_trans(self.get_proposal_pos_embed(topk_anchors_unact)))  # (bs, nq, 256)
         query_pos = query_pos[:, :, None, :]  # (bs, nq,1, 256)
         init_reference_out = reference_points
+        # print(reference_points.shape)
         # learnable control point content queries
         query_embed = query_embed.unsqueeze(0).expand(bs, -1, -1, -1)  # (bs, nq,1, 256)
 
@@ -235,6 +240,7 @@ class DeformableTransformer_Det(nn.Module):
             src_padding_mask=mask_flatten
         )
         inter_references_out = inter_references
+        # print(hs.shape,init_reference_out.shape,inter_references_out.shape,enc_outputs_class.shape,enc_outputs_anchor_unact.shape)
 
         return hs, init_reference_out, inter_references_out, enc_outputs_class, enc_outputs_anchor_unact
 

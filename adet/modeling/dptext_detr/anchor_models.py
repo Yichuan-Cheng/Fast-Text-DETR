@@ -136,8 +136,8 @@ class DPText_DETR(nn.Module):
             srcs.append(self.input_proj[l](src))
             masks.append(mask)
             assert mask is not None
-        for i in srcs:
-            print(i.shape)
+        # for i in srcs:
+        #     print(i.shape)
         if self.num_feature_levels > len(srcs):
             _len_srcs = len(srcs)
             for l in range(_len_srcs, self.num_feature_levels):
@@ -151,14 +151,15 @@ class DPText_DETR(nn.Module):
                 srcs.append(src)
                 masks.append(mask)
                 pos.append(pos_l)
-
+        # for i in srcs:
+        #     print(i.shape)
         # n_pts, embed_dim --> n_q, n_pts, embed_dim
         ctrl_point_embed = self.ctrl_point_embed.weight[None, ...].repeat(self.num_proposals, 1, 1)
 
         hs, init_reference, inter_references, enc_outputs_class, enc_outputs_coord_unact = self.transformer(
             srcs, masks, pos, ctrl_point_embed
         )
-        print(hs.shape,init_reference.shape,inter_references.shape,enc_outputs_class.shape,enc_outputs_coord_unact.shape)
+        # print(hs.shape,init_reference.shape,inter_references.shape,enc_outputs_class.shape,enc_outputs_coord_unact.shape)
 
         outputs_classes = []
         outputs_coords = []
