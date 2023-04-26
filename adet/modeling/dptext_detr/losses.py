@@ -127,18 +127,18 @@ class SetCriterion(nn.Module):
         src_boxes = outputs['pred_boxes'][idx]
         target_boxes = torch.cat([t['boxes'][i] for t, (_, i) in zip(targets, indices)], dim=0)
 
-        loss_bbox = F.l1_loss(src_boxes, target_boxes, reduction='none')
+        loss_bbox = F.l1_loss(src_boxes, target_boxes[:,:2], reduction='none')
 
         losses = {}
         losses['loss_bbox'] = loss_bbox.sum() / num_inst
 
-        loss_giou = 1 - torch.diag(
-            generalized_box_iou(
-                box_cxcywh_to_xyxy(src_boxes),
-                box_cxcywh_to_xyxy(target_boxes)
-            )
-        )
-        losses['loss_giou'] = loss_giou.sum() / num_inst
+        # loss_giou = 1 - torch.diag(
+        #     generalized_box_iou(
+        #         box_cxcywh_to_xyxy(src_boxes),
+        #         box_cxcywh_to_xyxy(target_boxes)
+        #     )
+        # )
+        # losses['loss_giou'] = loss_giou.sum() / num_inst
         return losses
 
     def loss_ctrl_points(self, outputs, targets, indices, num_inst):
@@ -147,11 +147,16 @@ class SetCriterion(nn.Module):
         assert 'pred_ctrl_points' in outputs
         idx = self._get_src_permutation_idx(indices)
         src_ctrl_points = outputs['pred_ctrl_points'][idx]
+        src_anchor_points = outputs['pred_anchor_points'][idx]
         target_ctrl_points = torch.cat([t['ctrl_points'][i] for t, (_, i) in zip(targets, indices)], dim=0)
-
+        target_anchor_points = target_ctrl_points.mean(dim=1)
+        # print(target_anchor_points.shape, src_anchor_points.shape)
         loss_ctrl_points = F.l1_loss(src_ctrl_points, target_ctrl_points, reduction='sum')
+        loss_anchor_points = F.l1_loss(src_anchor_points, target_anchor_points, reduction='sum')
+        # print(target_anchor_points, src_anchor_points)
 
-        losses = {'loss_ctrl_points': loss_ctrl_points / num_inst}
+
+        losses = {'loss_ctrl_points': loss_ctrl_points / num_inst, 'loss_anchor_points': loss_anchor_points / num_inst}
         return losses
 
     @staticmethod
@@ -189,7 +194,7 @@ class SetCriterion(nn.Module):
         
         # Retrieve the matching between the outputs of the last layer and the targets
         indices = self.dec_matcher(outputs_without_aux, targets)
-
+        # print('gt_ctrl_points:',[t['ctrl_points'].shape for t in targets])
         # Compute the average number of target boxes accross all nodes, for normalization purposes
         num_inst = sum(len(t['ctrl_points']) for t in targets)
         num_inst = torch.as_tensor([num_inst], dtype=torch.float, device=next(iter(outputs.values())).device)
@@ -199,6 +204,7 @@ class SetCriterion(nn.Module):
 
         # Compute all the requested losses
         losses = {}
+        # print(self.dec_losses)
         for loss in self.dec_losses:
             kwargs = {}
             losses.update(self.get_loss(loss, outputs, targets, indices, num_inst, **kwargs))

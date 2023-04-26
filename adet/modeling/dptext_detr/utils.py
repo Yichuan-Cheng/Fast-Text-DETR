@@ -25,6 +25,7 @@ def gen_point_pos_embed(pts_tensor):
     # pts_tensor shape: (bs, nq, n_pts, 2)
     # return size:
     # - pos: (bs, nq, n_pts, 256)
+    # print('pts_tensor: ', pts_tensor.shape)
     scale = 2 * math.pi
     dim_t = torch.arange(128, dtype=torch.float32, device=pts_tensor.device)
     dim_t = 10000 ** (2 * torch.div(dim_t, 2, rounding_mode='trunc') / 128)
