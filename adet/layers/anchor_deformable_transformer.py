@@ -16,6 +16,7 @@ from adet.utils.misc import inverse_sigmoid
 from adet.modeling.dptext_detr.utils import MLP, gen_point_pos_embed
 from .ms_deform_attn import MSDeformAttn
 from timm.models.layers import DropPath
+from .feature_fuse import ScaleFeatureSelection
 
 
 class DeformableTransformer_Det(nn.Module):
@@ -42,6 +43,7 @@ class DeformableTransformer_Det(nn.Module):
         self.d_model = d_model
         self.nhead = nhead
         self.num_proposals = num_proposals
+        self.total_num_feature_levels = 4
 
         encoder_layer = DeformableTransformerEncoderLayer(
             d_model,
@@ -53,6 +55,8 @@ class DeformableTransformer_Det(nn.Module):
             enc_n_points
         )
         self.encoder = DeformableTransformerEncoder(encoder_layer, num_encoder_layers)
+
+        self.feature_fuse = ScaleFeatureSelection()
 
         decoder_layer = DeformableTransformerDecoderLayer_Det(
             d_model,
@@ -79,9 +83,9 @@ class DeformableTransformer_Det(nn.Module):
         self.enc_output = nn.Linear(d_model, d_model)
         self.enc_output_norm = nn.LayerNorm(d_model)
 
-        # if not epqm:
-        self.pos_trans = nn.Linear(d_model, d_model)
-        self.pos_trans_norm = nn.LayerNorm(d_model)
+        if not epqm:
+            self.pos_trans = nn.Linear(d_model, d_model)
+            self.pos_trans_norm = nn.LayerNorm(d_model)
 
         self.num_ctrl_points = num_ctrl_points
         self.epqm = epqm
@@ -178,6 +182,7 @@ class DeformableTransformer_Det(nn.Module):
         spatial_shapes = []
         for lvl, (src, mask, pos_embed) in enumerate(zip(srcs, masks, pos_embeds)):
             bs, c, h, w = src.shape
+            # print(src.shape)
             spatial_shape = (h, w)
             spatial_shapes.append(spatial_shape)
             src = src.flatten(2).transpose(1, 2)
@@ -204,12 +209,28 @@ class DeformableTransformer_Det(nn.Module):
             mask_flatten
         )
 
+        # Rebuild Feature Maps form Encoder Queries
+        split_size_or_sections = [None] * self.total_num_feature_levels
+        for i in range(self.total_num_feature_levels):
+            if i < self.total_num_feature_levels - 1:
+                split_size_or_sections[i] = level_start_index[i + 1] - level_start_index[i]
+            else:
+                split_size_or_sections[i] = memory.shape[1] - level_start_index[i]
+        y = torch.split(memory, split_size_or_sections, dim=1)
+        # print([tmp.shape for tmp in y])
+        encoder_features = []
+        num_cur_levels = 0
+        for i, z in enumerate(y):
+            encoder_features.append(z.transpose(1, 2).reshape(bs, -1, spatial_shapes[i][0], spatial_shapes[i][1]))
+        # print([tmp.shape for tmp in encoder_features])
+        fused_feature = self.feature_fuse(encoder_features)
+        # print(fused_feature.shape)
         # prepare input for decoder
         bs, _, c = memory.shape
         output_memory, output_proposals = self.gen_encoder_output_proposals(memory, mask_flatten, spatial_shapes)
 
         enc_outputs_class = self.bbox_class_embed(output_memory)
-        # print(self.bbox_embed(output_memory).shape,output_proposals.shape)
+        # print(self.bbox_embed(output_memory).shape, output_proposals.shape)
         enc_outputs_anchor_unact = self.bbox_embed(output_memory) + output_proposals
         # print(enc_outputs_anchor_unact.shape)
 
@@ -222,13 +243,15 @@ class DeformableTransformer_Det(nn.Module):
         reference_points = topk_anchors_unact.sigmoid()[:, :, None, :]  # (bs, nq,1, 2)
 
         # positional queries
-        print(self.get_proposal_pos_embed(topk_anchors_unact).shape)
+        # print(self.get_proposal_pos_embed(topk_anchors_unact).shape)
+        # if not self.epqm
         query_pos = self.pos_trans_norm(self.pos_trans(self.get_proposal_pos_embed(topk_anchors_unact)))  # (bs, nq, 256)
         query_pos = query_pos[:, :, None, :]  # (bs, nq,1, 256)
         init_reference_out = reference_points
         # print(reference_points.shape)
         # learnable control point content queries
         query_embed = query_embed.unsqueeze(0).expand(bs, -1, -1, -1)  # (bs, nq,1, 256)
+
 
         hs, inter_references = self.decoder(
             query_embed,# (bs, nq,1, 256)
@@ -237,12 +260,14 @@ class DeformableTransformer_Det(nn.Module):
             spatial_shapes,
             level_start_index,
             valid_ratios,
-            src_padding_mask=mask_flatten
+            src_padding_mask=mask_flatten,
+            query_pos = query_pos if not self.epqm else None,
+            fused_feature=fused_feature
         )
         inter_references_out = inter_references
         # print(hs.shape,init_reference_out.shape,inter_references_out.shape,enc_outputs_class.shape,enc_outputs_anchor_unact.shape)
 
-        return hs, init_reference_out, inter_references_out, enc_outputs_class, enc_outputs_anchor_unact
+        return hs, init_reference_out, inter_references_out, enc_outputs_class, enc_outputs_anchor_unact, fused_feature
 
 
 class DeformableTransformerEncoderLayer(nn.Module):
@@ -375,17 +400,17 @@ class DeformableTransformerDecoderLayer_Det(nn.Module):
         self.dropout_cross = nn.Dropout(dropout)
         self.norm_cross = nn.LayerNorm(d_model)
 
-        # intra-group self-attention
-        if self.efsa:
-            self.attn_intra = nn.MultiheadAttention(d_model, n_heads, dropout=0.)
-            self.circonv = CirConv(d_model)
-            self.norm_fuse = nn.LayerNorm(d_model)
-            self.mlp_fuse = nn.Linear(d_model, d_model)
-            self.drop_path = DropPath(0.1)
-        else:
-            self.attn_intra = nn.MultiheadAttention(d_model, n_heads, dropout=dropout)
-            self.dropout_intra = nn.Dropout(dropout)
-        self.norm_intra = nn.LayerNorm(d_model)
+        # # intra-group self-attention
+        # if self.efsa:
+        #     self.attn_intra = nn.MultiheadAttention(d_model, n_heads, dropout=0.)
+        #     self.circonv = CirConv(d_model)
+        #     self.norm_fuse = nn.LayerNorm(d_model)
+        #     self.mlp_fuse = nn.Linear(d_model, d_model)
+        #     self.drop_path = DropPath(0.1)
+        # else:
+        #     self.attn_intra = nn.MultiheadAttention(d_model, n_heads, dropout=dropout)
+        #     self.dropout_intra = nn.Dropout(dropout)
+        # self.norm_intra = nn.LayerNorm(d_model)
 
         # inter-group self-attention
         self.attn_inter = nn.MultiheadAttention(d_model, n_heads, dropout=dropout)
@@ -492,8 +517,39 @@ class DeformableTransformerDecoder_Det(nn.Module):
         self.class_embed = None
         self.ctrl_point_coord = None
         self.epqm = epqm
+        self.decoder_norm = None
+        self.mask_embed = None
+        self.device = None
         if epqm:
             self.ref_point_head = MLP(d_model, d_model, d_model, 2)
+
+    def get_reference_from_anchor(self, output, mask_features):
+        decoder_output = self.decoder_norm(output)
+        # decoder_output = decoder_output.transpose(0, 1)
+        # outputs_class = self.ctrl_point_class[0](decoder_output)
+
+        mask_embed = self.mask_embed(decoder_output)
+        # coord_offset = self.offset_embed(decoder_output)
+        outputs_mask = torch.einsum("bqc,bchw->bqhw", mask_embed, mask_features)
+ 
+        b, nq, h,w = outputs_mask.shape
+        # h: 1 / (h + 1) ... h / (h+1)
+        x, y = torch.meshgrid(torch.linspace(1 / (h + 1),h / (h + 1),h),\
+                              torch.linspace(1 / (w + 1),w / (w + 1),w))
+        pre_defined_anchor_grids = torch.stack((x, y), 2).view((1,1,h*w,2)).float().to(self.device)
+        outputs_anchor_weights_map = F.softmax(outputs_mask.reshape(b,nq,h*w), dim=-1).unsqueeze(-1)
+
+        # Weighted sum at the spatial dimension
+        anchor_point = (pre_defined_anchor_grids * outputs_anchor_weights_map).sum(dim=-2) 
+        reference_point = anchor_point.unsqueeze(2)
+        # print('rp: ',reference_point.shape)
+        # corrds = anchor_point.unsqueeze(2) + coord_offset.reshape(b,nq,-1,2)
+        # print(outputs_mask.shape)
+        # if outputs_mask.shape[1] > self.num_queries:
+        #     outputs_mask = torch.concat([F.softmax(outputs_mask[:,:self.num_queries], dim=1), F.softmax(outputs_mask[:,self.num_queries:], dim=1)], dim=1)
+        # else:
+        #     outputs_mask = F.softmax(outputs_mask, dim=1)
+        return reference_point
 
     def forward(
             self,
@@ -504,7 +560,8 @@ class DeformableTransformerDecoder_Det(nn.Module):
             src_level_start_index,
             src_valid_ratios,
             query_pos=None,
-            src_padding_mask=None
+            src_padding_mask=None,
+            fused_feature=None
     ):
         output = tgt  # bs, n_q, 1, 256
 
@@ -513,11 +570,14 @@ class DeformableTransformerDecoder_Det(nn.Module):
         for lid, layer in enumerate(self.layers):
                 # reference_points: (bs, nq, 1, 2)
                 # reference_points_input: (bs, nq, 1, 4, 2)
-            reference_points_input = reference_points[:, :, :, None] * src_valid_ratios[:, None, None]
+            # print('val ratio:', src_valid_ratios)
+            reference_points_input = reference_points.unsqueeze(3).repeat(1,1,1,4,1)
+            # print(reference_points_input.shape)
+            # reference_points_input = reference_points[:, :, :, None] * src_valid_ratios[:, None, None]
 
             if self.epqm:
                 # embed the explicit point coordinates
-                query_pos = gen_point_pos_embed(reference_points_input[:, :, :, 0, :])  #  (bs, nq, 1, dim)
+                query_pos = gen_point_pos_embed(reference_points)  #  (bs, nq, 1, dim)
                 # get the positional queries
                 query_pos = self.ref_point_head(query_pos) # projection
 
@@ -532,11 +592,12 @@ class DeformableTransformerDecoder_Det(nn.Module):
             )
 
             # update the reference points
-            if self.ctrl_point_coord is not None:
-                tmp = self.ctrl_point_coord[lid](output) # (bs, nq, 1, 2)
-                tmp += inverse_sigmoid(reference_points)
-                tmp = tmp.sigmoid()
-                reference_points = tmp.detach()
+            reference_points = self.get_reference_from_anchor(output[:,:,0], fused_feature)
+            # if self.ctrl_point_coord is not None:
+            #     tmp = self.ctrl_point_coord[lid](output) # (bs, nq, 1, 2)
+            #     tmp += inverse_sigmoid(reference_points)
+            #     tmp = tmp.sigmoid()
+            #     reference_points = tmp.detach()
 
             if self.return_intermediate:
                 intermediate.append(output)
