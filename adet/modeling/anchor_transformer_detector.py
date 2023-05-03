@@ -74,6 +74,11 @@ class MaskedBackbone(nn.Module):
 def detector_postprocess(results, output_height, output_width):
     scale_x, scale_y = (
         output_width / results.image_size[1], output_height / results.image_size[0])
+    # scale_x, scale_y = (
+        # results.image_size[1] / output_width, results.image_size[0] / output_height)
+    # scale_x = 1
+    # scale_y = 1
+    
 
     if results.has("beziers"):
         beziers = results.beziers
@@ -95,6 +100,7 @@ def detector_postprocess(results, output_height, output_width):
         polygons = results.polygons
         polygons[:, 0::2] *= scale_x
         polygons[:, 1::2] *= scale_y
+    # print(polygons[0])
 
     return results
 
@@ -196,10 +202,11 @@ class TransformerPureDetector(nn.Module):
         if self.training:
             gt_instances = [x["instances"].to(
                 self.device) for x in batched_inputs]
-            targets = self.prepare_targets(gt_instances)
+            # print(images.tensor.shape)
+            targets = self.prepare_targets(gt_instances, images.tensor.shape[-2:])
             output = self.dptext_detr(images)
             # compute the loss
-            loss_dict = self.criterion(output, targets)
+            loss_dict = self.criterion(output, targets, gt_instances)
             weight_dict = self.criterion.weight_dict
             for k in loss_dict.keys():
                 if k in weight_dict:
@@ -209,20 +216,26 @@ class TransformerPureDetector(nn.Module):
             output = self.dptext_detr(images)
             ctrl_point_cls = output["pred_logits"]
             ctrl_point_coord = output["pred_ctrl_points"]
+            anchor_points = output['pred_anchor_points']
             results = self.inference(
                 ctrl_point_cls, ctrl_point_coord, images.image_sizes)
             processed_results = []
             for results_per_image, input_per_image, image_size in zip(results, batched_inputs, images.image_sizes):
                 height = input_per_image.get("height", image_size[0])
                 width = input_per_image.get("width", image_size[1])
+                # print(height, width)
                 r = detector_postprocess(results_per_image, height, width)
                 processed_results.append({"instances": r})
             return processed_results
 
-    def prepare_targets(self, targets):
+    def prepare_targets(self, targets, image_size):
         new_targets = []
         for targets_per_image in targets:
-            h, w = targets_per_image.image_size
+            # h, w = targets_per_image.image_size
+            # print(w ,h)
+            h, w = image_size
+            # print(h, w)
+            # print(image_size)
             image_size_xyxy = torch.as_tensor(
                 [w, h, w, h], dtype=torch.float, device=self.device)
             gt_classes = targets_per_image.gt_classes
@@ -232,6 +245,7 @@ class TransformerPureDetector(nn.Module):
             gt_ctrl_points = raw_ctrl_points.reshape(-1, self.dptext_detr.num_ctrl_points, 2) / \
                 torch.as_tensor([w, h], dtype=torch.float,
                                 device=self.device)[None, None, :]
+            # print(gt_ctrl_points.shape)
             gt_ctrl_points = torch.clamp(gt_ctrl_points[:, :, :2], 0, 1)
             new_targets.append(
                 {"labels": gt_classes, "boxes": gt_boxes,
@@ -242,14 +256,16 @@ class TransformerPureDetector(nn.Module):
     def inference(self, ctrl_point_cls, ctrl_point_coord, image_sizes):
         assert len(ctrl_point_cls) == len(image_sizes)
         results = []
-
-        prob = ctrl_point_cls.mean(-2).sigmoid()
+        # print(ctrl_point_cls.shape)
+        prob = ctrl_point_cls.sigmoid()
+        # print(prob)
         scores, labels = prob.max(-1)
 
         for scores_per_image, labels_per_image, ctrl_point_per_image, image_size in zip(
                 scores, labels, ctrl_point_coord, image_sizes
         ):
-            selector = scores_per_image >= self.test_score_threshold
+            selector = scores_per_image >= 0.2#self.test_score_threshold
+            # print(selector)
             scores_per_image = scores_per_image[selector]
             labels_per_image = labels_per_image[selector]
             ctrl_point_per_image = ctrl_point_per_image[selector]
@@ -257,8 +273,10 @@ class TransformerPureDetector(nn.Module):
             result = Instances(image_size)
             result.scores = scores_per_image
             result.pred_classes = labels_per_image
+            # print(image_size)
             ctrl_point_per_image[..., 0] *= image_size[1]
             ctrl_point_per_image[..., 1] *= image_size[0]
+            # print(ctrl_point_per_image.shape)
             if self.use_polygon:
                 result.polygons = ctrl_point_per_image.flatten(1)
             else:
