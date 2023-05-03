@@ -104,7 +104,7 @@ class DPText_DETR(nn.Module):
             nn.init.constant_(proj[0].bias, 0)
 
         num_pred = self.num_decoder_layers
-        self.ctrl_point_class = nn.ModuleList([self.ctrl_point_class for _ in range(num_pred)])
+        # self.ctrl_point_class = nn.ModuleList([self.ctrl_point_class for _ in range(num_pred)])
         # self.ctrl_point_coord = nn.ModuleList([self.ctrl_point_coord for _ in range(num_pred)])
         # if self.epqm:
         #     self.transformer.decoder.ctrl_point_coord = self.ctrl_point_coord
@@ -123,30 +123,34 @@ class DPText_DETR(nn.Module):
 
     def forward_prediction_heads(self, output, mask_features):
         decoder_output = self.decoder_norm(output)
+        # print(mask_features.shape)
         # decoder_output = decoder_output.transpose(0, 1)
-        outputs_class = self.ctrl_point_class[0](decoder_output)
+        outputs_class = self.ctrl_point_class(decoder_output)
 
         mask_embed = self.mask_embed(decoder_output)
         coord_offset = self.offset_embed(decoder_output)
         outputs_mask = torch.einsum("bqc,bchw->bqhw", mask_embed, mask_features)
  
-        b, nq, h,w = outputs_mask.shape
+        b, nq, h, w = outputs_mask.shape
         # h: 1 / (h + 1) ... h / (h+1)
-        x, y = torch.meshgrid(torch.linspace(1 / (h + 1),h / (h + 1),h),\
-                              torch.linspace(1 / (w + 1),w / (w + 1),w))
-        pre_defined_anchor_grids = torch.stack((x, y), 2).view((1,1,h*w,2)).float().to(self.device)
+        # 1 * input_shape[-1] / (w + 1), w * input_shape[-1] / (w + 1)
+        x, y = torch.meshgrid(torch.linspace(1 / (w + 1),w / (w + 1),w),\
+                              torch.linspace(1 / (h + 1),h / (h + 1),h))
+        pre_defined_anchor_grids = torch.stack((x, y), 2).reshape((1,1,h*w,2)).float().to(self.device)
+        # print(pre_defined_anchor_grids, h, w)
         outputs_anchor_weights_map = F.softmax(outputs_mask.reshape(b,nq,h*w), dim=-1).unsqueeze(-1)
 
         # Weighted sum at the spatial dimension
         anchor_point = (pre_defined_anchor_grids * outputs_anchor_weights_map).sum(dim=-2) 
 
-        corrds = anchor_point.unsqueeze(2) + coord_offset.reshape(b,nq,-1,2)
+        corrds = anchor_point.unsqueeze(2) + coord_offset.reshape(b,nq,-1,2).sigmoid()
+        # print(corrds)
         # print(outputs_mask.shape)
         # if outputs_mask.shape[1] > self.num_queries:
         #     outputs_mask = torch.concat([F.softmax(outputs_mask[:,:self.num_queries], dim=1), F.softmax(outputs_mask[:,self.num_queries:], dim=1)], dim=1)
         # else:
         #     outputs_mask = F.softmax(outputs_mask, dim=1)
-        return outputs_class, anchor_point, corrds
+        return outputs_class, anchor_point, corrds#coord_offset.reshape(b,nq,-1,2).sigmoid()
 
     def forward(self, samples: NestedTensor):
         """ The forward expects a NestedTensor, which consists of:
@@ -156,8 +160,10 @@ class DPText_DETR(nn.Module):
         if isinstance(samples, (list, torch.Tensor)):
             samples = nested_tensor_from_tensor_list(samples)
 
-        # print(samples.tensor.shape)
+        input_shape = samples.tensor.shape
+        # print(input_shape)
         features, pos = self.backbone(samples)
+        
         # for i in features:
         #     print(i.tensors.shape)
 
@@ -200,6 +206,7 @@ class DPText_DETR(nn.Module):
         outputs_classes = []
         outputs_coords = []
         outputs_anchors = []
+
         for i, output in enumerate(hs):
             # print(output.shape)
             outputs_class, outputs_anchor, outputs_coord = self.forward_prediction_heads(output[:,:,0], fused_feature)

@@ -151,7 +151,7 @@ class SetCriterion(nn.Module):
         target_ctrl_points = torch.cat([t['ctrl_points'][i] for t, (_, i) in zip(targets, indices)], dim=0)
         target_anchor_points = target_ctrl_points.mean(dim=1)
         # print(target_anchor_points.shape, src_anchor_points.shape)
-        loss_ctrl_points = F.l1_loss(src_ctrl_points, target_ctrl_points, reduction='sum')
+        loss_ctrl_points = F.l1_loss(src_ctrl_points, target_ctrl_points, reduction='sum') / src_ctrl_points.shape[1]
         loss_anchor_points = F.l1_loss(src_anchor_points, target_anchor_points, reduction='sum')
         # print(target_anchor_points, src_anchor_points)
 
@@ -183,13 +183,16 @@ class SetCriterion(nn.Module):
         assert loss in loss_map, f'do you really want to compute {loss} loss?'
         return loss_map[loss](outputs, targets, indices, num_inst, **kwargs)
 
-    def forward(self, outputs, targets):
+    def forward(self, outputs, targets, gt_instances):
         """ This performs the loss computation.
         Parameters:
             outputs: dict of tensors, see the output specification of the model for the format
             targets: list of dicts, such that len(targets) == batch_size.
                   The expected keys in each dict depends on the losses applied, see each loss' doc
         """
+        # for ins in gt_instances:
+        #     h, w = ins.image_size
+            
         outputs_without_aux = {k: v for k, v in outputs.items() if k != 'aux_outputs' and k != 'enc_outputs'}
         
         # Retrieve the matching between the outputs of the last layer and the targets
