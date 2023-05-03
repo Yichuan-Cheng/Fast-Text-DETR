@@ -199,6 +199,7 @@ class DeformableTransformer_Det(nn.Module):
         level_start_index = torch.cat((spatial_shapes.new_zeros((1,)), spatial_shapes.prod(1).cumsum(0)[:-1]))
         valid_ratios = torch.stack([self.get_valid_ratio(m) for m in masks], 1)
 
+        # print(valid_ratios)
         # encoder
         memory = self.encoder(
             src_flatten,
@@ -534,8 +535,8 @@ class DeformableTransformerDecoder_Det(nn.Module):
  
         b, nq, h,w = outputs_mask.shape
         # h: 1 / (h + 1) ... h / (h+1)
-        x, y = torch.meshgrid(torch.linspace(1 / (h + 1),h / (h + 1),h),\
-                              torch.linspace(1 / (w + 1),w / (w + 1),w))
+        x, y = torch.meshgrid(torch.linspace(1 / (w + 1),w / (w + 1),w),\
+                              torch.linspace(1 / (h + 1),h / (h + 1),h))
         pre_defined_anchor_grids = torch.stack((x, y), 2).view((1,1,h*w,2)).float().to(self.device)
         outputs_anchor_weights_map = F.softmax(outputs_mask.reshape(b,nq,h*w), dim=-1).unsqueeze(-1)
 
@@ -568,9 +569,10 @@ class DeformableTransformerDecoder_Det(nn.Module):
         intermediate = []
         intermediate_reference_points = []
         for lid, layer in enumerate(self.layers):
-                # reference_points: (bs, nq, 1, 2)
-                # reference_points_input: (bs, nq, 1, 4, 2)
-            # print('val ratio:', src_valid_ratios)
+            # reference_points: (bs, nq, 1, 2)
+            # reference_points_input: (bs, nq, 1, 4, 2)
+
+            # Reference Point at Four Feature Level
             reference_points_input = reference_points.unsqueeze(3).repeat(1,1,1,4,1)
             # print(reference_points_input.shape)
             # reference_points_input = reference_points[:, :, :, None] * src_valid_ratios[:, None, None]
