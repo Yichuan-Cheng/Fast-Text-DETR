@@ -68,7 +68,7 @@ class DeformableTransformer_Det(nn.Module):
             dec_n_points,
             efsa
         )
-        self.decoder = DeformableTransformerDecoder_AnchorDet(
+        self.decoder_new = DeformableTransformerDecoder_AnchorDet(
             decoder_layer,
             num_decoder_layers,
             return_intermediate_dec,
@@ -256,7 +256,7 @@ class DeformableTransformer_Det(nn.Module):
         # print(query_embed.shape)
 
 
-        hs, inter_references, inter_query_pos, inter_anchor_point = self.decoder(
+        hs, inter_references, segmentation_map, anchor_point = self.decoder_new(
             query_embed,# (bs, nq,1, 256)
             reference_points, # (bs, nq,1, 2)
             memory, #(bs, map_size, 256)
@@ -270,7 +270,7 @@ class DeformableTransformer_Det(nn.Module):
         inter_references_out = inter_references
         # print(hs.shape,init_reference_out.shape,inter_references_out.shape,enc_outputs_class.shape,enc_outputs_anchor_unact.shape)
 
-        return hs, init_reference_out, inter_references_out, enc_outputs_class, enc_outputs_anchor_unact, fused_feature, inter_query_pos, inter_anchor_point
+        return hs, init_reference_out, inter_references_out, enc_outputs_class, enc_outputs_anchor_unact, segmentation_map, anchor_point#inter_query_pos, inter_anchor_point
 
 
 class DeformableTransformerEncoderLayer(nn.Module):
@@ -530,14 +530,19 @@ class DeformableTransformerDecoder_AnchorDet(nn.Module):
         self.device = None
         self.mask_feature_proj = None
         self.offset_embed = None
+        self.query_aggregation_weights = None
 
         # if epqm:
         self.ref_point_head = MLP(d_model, d_model, d_model, 2)
 
     def get_reference_from_anchor(self, output, mask_features, lvl):
         b, nq, n_ctrl, h = output.shape
-        output = self.point_embd_norm(output.reshape(b * nq, n_ctrl, h)).reshape(b, nq, n_ctrl, h)
-        decoder_output = self.decoder_norm(output.sum(dim=-2))
+        output = self.point_embd_norm(output.reshape(b * nq, n_ctrl, h))#.reshape(b, nq, n_ctrl, h)
+        query_aggregation_weights = self.query_aggregation_weights(output.transpose(-1,-2)).reshape(b,nq,n_ctrl,1)
+        # print(query_aggregation_weights.shape)
+        output = output.reshape(b, nq, n_ctrl, h)
+        aggregated_query = (output * query_aggregation_weights).sum(dim=-2)
+        decoder_output = self.decoder_norm(aggregated_query)
         mask_features = self.mask_feature_proj(mask_features)
         # print(mask_features.shape)
         # decoder_output = decoder_output.transpose(0, 1)
@@ -568,7 +573,7 @@ class DeformableTransformerDecoder_AnchorDet(nn.Module):
         outputs_anchor_weights_map = F.softmax(outputs_mask.reshape(b,nq,h*w), dim=-1).reshape(b,nq,h,w).unsqueeze(-1)
 
         # Weighted sum at the spatial dimension
-        anchor_point = (pre_defined_anchor_grids.unsqueeze(0) * outputs_anchor_weights_map).sum(dim=(2,3)) 
+        anchor_point = (pre_defined_anchor_grids.unsqueeze(0) * outputs_anchor_weights_map).sum(dim=(2,3)).detach() 
 
         # corrds_upper = anchor_point.unsqueeze(2) + (corrd_offset_upper.reshape(b,nq,self.num_ctrl_points//2,2).sigmoid() - 0.5) * 2
         # corrds_lower = anchor_point.unsqueeze(2) + (corrd_offset_lower.reshape(b,nq,self.num_ctrl_points//2,2).sigmoid() - 0.5) * 2
@@ -580,7 +585,7 @@ class DeformableTransformerDecoder_AnchorDet(nn.Module):
         #     subsequent_coords.append(subsequent_coords[i-1] + (self.offset_embed[i](decoder_output).unsqueeze(2).sigmoid() - 0.5) * 2)
         # print([x.shape for x in subsequent_coords])
         # reference_point = torch.cat((corrds_upper, corrds_lower), dim=-2)
-        return reference_point, anchor_point
+        return reference_point, anchor_point, outputs_mask
 
     def forward(
             self,
@@ -600,6 +605,7 @@ class DeformableTransformerDecoder_AnchorDet(nn.Module):
         intermediate_reference_points = []
         intermediate_query_pos = []
         intermediate_anchor_point = []
+        intermediate_segmentation_map = []
         for lid, layer in enumerate(self.layers):
             # reference_points: (bs, nq, 1, 2)
             # reference_points_input: (bs, nq, 1, 4, 2)
@@ -608,7 +614,7 @@ class DeformableTransformerDecoder_AnchorDet(nn.Module):
             # reference_points_input = reference_points.unsqueeze(3).repeat(1,1,1,4,1)
             # print(reference_points_input.shape)
             reference_points_input = reference_points[:, :, :, None] * src_valid_ratios[:, None, None]
-
+            # print(src_valid_ratios)
             # if self.epqm:
             # embed the explicit point coordinates
             query_pos = gen_point_pos_embed(reference_points)  #  (bs, nq, 1, dim)
@@ -629,7 +635,7 @@ class DeformableTransformerDecoder_AnchorDet(nn.Module):
 
             # update the reference points
             # print(output.shape)
-            reference_points, anchor_point = self.get_reference_from_anchor(output, fused_feature, lid)
+            reference_points, anchor_point, segmentation_map = self.get_reference_from_anchor(output, fused_feature, lid)
 
 
             # print(query_pos.shape)
@@ -642,13 +648,14 @@ class DeformableTransformerDecoder_AnchorDet(nn.Module):
             if self.return_intermediate:
                 intermediate.append(output)
                 intermediate_reference_points.append(reference_points)
-                intermediate_query_pos.append(query_pos)
+                # intermediate_query_pos.append(query_pos)
                 intermediate_anchor_point.append(anchor_point)
+                intermediate_segmentation_map.append(segmentation_map)
 
         if self.return_intermediate:
-            return torch.stack(intermediate), torch.stack(intermediate_reference_points), torch.stack(intermediate_query_pos), torch.stack(intermediate_anchor_point)
+            return torch.stack(intermediate), torch.stack(intermediate_reference_points), torch.stack(intermediate_segmentation_map), torch.stack(intermediate_anchor_point)#, torch.stack(intermediate_query_pos)
 
-        return output, reference_points, query_pos, anchor_point
+        return output, reference_points, segmentation_map, anchor_point#query_pos
 
 
 def _get_clones(module, N):
