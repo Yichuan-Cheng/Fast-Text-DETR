@@ -159,7 +159,7 @@ class CtrlPointHungarianMatcher(nn.Module):
         """
         super().__init__()
         self.class_weight = 4
-        self.coord_weight = 2
+        self.coord_weight = 5
         # self.anchor_weight = coord_weight
         self.mask_weight = 5
         self.alpha = focal_alpha
@@ -219,7 +219,7 @@ class CtrlPointHungarianMatcher(nn.Module):
             cost_class = pos_cost_class - neg_cost_class#.mean(-1, keepdims=True)
 
             # print(out_pts.shape, tgt_pts.shape)
-            cost_kpts = torch.cdist(out_pts, tgt_pts.flatten(-2), p=1) #/ 16
+            cost_kpts = torch.cdist(out_pts, tgt_pts.flatten(-2), p=1) / 16
 
             C = self.class_weight * cost_class + self.coord_weight * cost_kpts + \
                 self.mask_weight * cost_mask_dice + self.mask_weight * cost_mask_ce

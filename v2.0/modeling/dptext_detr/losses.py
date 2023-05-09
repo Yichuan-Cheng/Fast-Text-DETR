@@ -91,7 +91,7 @@ class SetCriterion(nn.Module):
         self.focal_gamma = focal_gamma
         self.num_ctrl_points = num_ctrl_points
         self.mask_weight = 5
-        self.reg_weight = 2
+        self.reg_weight = 5
         self.class_weight = 4
         self.oversample_ratio = 3.0
         self.importance_sample_ratio = 0.75
@@ -262,7 +262,7 @@ class SetCriterion(nn.Module):
         loss_dice = self.dice_loss(point_logits, point_labels, 1) * self.mask_weight
         loss_mask_ce = self.sigmoid_ce_loss(point_logits, point_labels) * self.mask_weight
         # print(target_anchor_points, src_anchor_points)
-        loss_ctrl_points = self.reg_weight * F.l1_loss(src_ctrl_points, target_ctrl_points, reduction='sum') #/ src_ctrl_points.shape[1]
+        loss_ctrl_points = self.reg_weight * F.l1_loss(src_ctrl_points, target_ctrl_points, reduction='sum') / src_ctrl_points.shape[1]
         # with torch.no_grad():
         # loss_anchor_points = self.reg_weight * F.l1_loss(src_anchor_points, target_anchor_points, reduction='sum')
         # print(target_anchor_points, src_anchor_points)
