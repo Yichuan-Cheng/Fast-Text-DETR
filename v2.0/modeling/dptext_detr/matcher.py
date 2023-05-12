@@ -45,6 +45,7 @@ def sigmoid_ce_loss(
     Returns:
         Loss tensor
     """
+    # print("sigmoid_ce_loss",inputs.shape,targets.shape)
     loss = F.binary_cross_entropy_with_logits(inputs, targets, reduction="none")
     # loss = F.binary_cross_entropy(inputs, targets, reduction="none")
     # print(loss.shape)
@@ -164,10 +165,10 @@ class CtrlPointHungarianMatcher(nn.Module):
         self.mask_weight = 5
         self.alpha = focal_alpha
         self.gamma = focal_gamma
-        self.num_points = 12544
+        self.num_points = 8000
         assert class_weight != 0 or coord_weight != 0, "all costs cant be 0"
 
-    def forward(self, outputs, targets):
+    def forward_(self, outputs, targets):
         with torch.no_grad():
             bs, num_queries = outputs["pred_logits"].shape[:2]
 
@@ -179,27 +180,35 @@ class CtrlPointHungarianMatcher(nn.Module):
             out_anchor_points = outputs['pred_anchor_points'].flatten(0, 1)
             # Also concat the target labels and boxes
             tgt_pts = torch.cat([v["ctrl_points"] for v in targets])#.flatten(-2)
+            # print("tgt_pts",tgt_pts.shape)
             tgt_masks = torch.cat([v["segmentation_map"] for v in targets])
-            tgt_masks = F.interpolate(tgt_masks.unsqueeze(1),size=out_masks.shape[-2:], mode="nearest").squeeze()
+            
+            tgt_masks = F.interpolate(tgt_masks.unsqueeze(1),size=out_masks.shape[-2:], mode="nearest").squeeze(dim=1)
 
             num_gt = tgt_masks.shape[0]
             out_masks = out_masks[:, None]
+            
             tgt_masks = tgt_masks[:, None]
 
             # all masks share the same set of points for efficient matching!
             point_coords = torch.rand(1, self.num_points, 2, device=out_masks.device)
             # get gt labels
+            # print("tgt_masks.shape",tgt_masks.shape)
             tgt_masks = point_sample(
                 tgt_masks,
                 point_coords.repeat(tgt_masks.shape[0], 1, 1),
                 align_corners=False,
             ).squeeze(1)
+            # print("tgt_masks.shape",tgt_masks.shape)
+
+            # print("out_masks.shape",out_masks.shape)
 
             out_masks = point_sample(
                 out_masks,
                 point_coords.repeat(out_masks.shape[0], 1, 1),
                 align_corners=False,
             ).squeeze(1)
+            # print("out_masks.shape",out_masks.shape)
 
             # print(tgt_masks.shape, out_masks.shape)
             cost_mask_dice = dice_loss(out_masks.unsqueeze(1), tgt_masks.unsqueeze(0))
@@ -220,6 +229,7 @@ class CtrlPointHungarianMatcher(nn.Module):
 
             # print(out_pts.shape, tgt_pts.shape)
             cost_kpts = torch.cdist(out_pts, tgt_pts.flatten(-2), p=1) / 16
+            # print("cost_class.shape",cost_class.shape,cost_kpts.shape,cost_mask_dice.shape,cost_mask_ce.shape)
 
             C = self.class_weight * cost_class + self.coord_weight * cost_kpts + \
                 self.mask_weight * cost_mask_dice + self.mask_weight * cost_mask_ce
@@ -229,7 +239,86 @@ class CtrlPointHungarianMatcher(nn.Module):
             sizes = [len(v["ctrl_points"]) for v in targets]
             indices = [linear_sum_assignment(
                 c[i]) for i, c in enumerate(C.split(sizes, -1))]
+            # print(indices)
             return [(torch.as_tensor(i, dtype=torch.int64), torch.as_tensor(j, dtype=torch.int64)) for i, j in indices]
+
+    def forward(self, outputs, targets):
+        rs=[]
+        with torch.no_grad():
+            bs, num_queries = outputs["pred_logits"].shape[:2]
+            for i in range(bs):
+                outputs_tmp = {key: value[[i]] for key, value in outputs.items()}
+                targets_tmp=[targets[i]]
+                rs+=self.forward_(outputs_tmp,targets_tmp)
+            return rs
+
+            # # We flatten to compute the cost matrices in a batch
+            # out_prob = outputs["pred_logits"].flatten(0, 1).sigmoid()
+            # # [batch_size, n_queries, n_points, 2] --> [batch_size * num_queries, n_points * 2]
+            # out_pts = outputs["pred_ctrl_points"].flatten(0, 1).flatten(-2)
+            # out_masks = outputs['pred_seg_mask'].flatten(0, 1)
+            # out_anchor_points = outputs['pred_anchor_points'].flatten(0, 1)
+            # # Also concat the target labels and boxes
+            # tgt_pts = torch.cat([v["ctrl_points"] for v in targets])#.flatten(-2)
+            # tgt_masks = torch.cat([v["segmentation_map"] for v in targets])
+            
+            # tgt_masks = F.interpolate(tgt_masks.unsqueeze(1),size=out_masks.shape[-2:], mode="nearest").squeeze(dim=1)
+
+            # num_gt = tgt_masks.shape[0]
+            # out_masks = out_masks[:, None]
+            
+            # tgt_masks = tgt_masks[:, None]
+
+            # # all masks share the same set of points for efficient matching!
+            # point_coords = torch.rand(1, self.num_points, 2, device=out_masks.device)
+            # # get gt labels
+            # print("tgt_masks.shape",tgt_masks.shape,out_masks.shape,out_prob.shape)
+            # tgt_masks = point_sample(
+            #     tgt_masks,
+            #     point_coords.repeat(tgt_masks.shape[0], 1, 1),
+            #     align_corners=False,
+            # ).squeeze(1)
+            # # print("tgt_masks.shape",tgt_masks.shape)
+
+            # # print("out_masks.shape",out_masks.shape)
+
+            # out_masks = point_sample(
+            #     out_masks,
+            #     point_coords.repeat(out_masks.shape[0], 1, 1),
+            #     align_corners=False,
+            # ).squeeze(1)
+            # # print("out_masks.shape",out_masks.shape)
+
+            # # print(tgt_masks.shape, out_masks.shape)
+            # cost_mask_dice = dice_loss(out_masks.unsqueeze(1), tgt_masks.unsqueeze(0))
+            # # print(cost_mask_dice.shape)
+            # cost_mask_ce = sigmoid_ce_loss(out_masks.unsqueeze(1).repeat(1,num_gt,1), tgt_masks.unsqueeze(0).repeat(out_masks.shape[0], 1, 1))
+    
+            # # print(tgt_masks.shape, out_masks.shape)
+            # # tgt_anchor = tgt_pts.mean(dim=-2)
+            # # print(tgt_anchor.shape, out_anchor_points.shape)
+
+            # neg_cost_class = (1 - self.alpha) * (out_prob ** self.gamma) * \
+            #                  (-(1 - out_prob + 1e-8).log())
+            # pos_cost_class = self.alpha * \
+            #                  ((1 - out_prob) ** self.gamma) * (-(out_prob + 1e-8).log())
+            # # hack here for label ID 0
+            # # print(neg_cost_class.shape)
+            # cost_class = pos_cost_class - neg_cost_class#.mean(-1, keepdims=True)
+
+            # # print(out_pts.shape, tgt_pts.shape)
+            # cost_kpts = torch.cdist(out_pts, tgt_pts.flatten(-2), p=1) / 16
+
+            # C = self.class_weight * cost_class + self.coord_weight * cost_kpts + \
+            #     self.mask_weight * cost_mask_dice + self.mask_weight * cost_mask_ce
+            # # C = self.class_weight * cost_class + self.anchor_weight * cost_anchor
+            # C = C.view(bs, num_queries, -1).cpu()
+
+            # sizes = [len(v["ctrl_points"]) for v in targets]
+            # indices = [linear_sum_assignment(
+            #     c[i]) for i, c in enumerate(C.split(sizes, -1))]
+            # print(indices)
+            # return [(torch.as_tensor(i, dtype=torch.int64), torch.as_tensor(j, dtype=torch.int64)) for i, j in indices]
 
 
 def build_matcher(cfg):

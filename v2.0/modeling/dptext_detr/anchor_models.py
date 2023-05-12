@@ -219,9 +219,10 @@ class DPText_DETR(nn.Module):
         """
         if isinstance(samples, (list, torch.Tensor)):
             samples = nested_tensor_from_tensor_list(samples)
+            
 
         input_shape = samples.tensor.shape
-        # print(input_shape)
+        # print("input_shape",input_shape)
         features, pos = self.backbone(samples)
         
         one_fourth_feature = features[0].tensors
@@ -242,7 +243,7 @@ class DPText_DETR(nn.Module):
             masks.append(mask)
             assert mask is not None
         # for i in srcs:
-        #     print(i.shape)
+            # print(i.shape)
         if self.num_feature_levels > len(srcs):
             _len_srcs = len(srcs)
             for l in range(_len_srcs, self.num_feature_levels):
@@ -256,6 +257,7 @@ class DPText_DETR(nn.Module):
                 srcs.append(src)
                 masks.append(mask)
                 pos.append(pos_l)
+                # print(src.shape,mask.shape,pos_l.shape)
         
         # Ignore one-forth faeture pos
         pos = pos[1:]

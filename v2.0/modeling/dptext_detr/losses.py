@@ -95,7 +95,7 @@ class SetCriterion(nn.Module):
         self.class_weight = 4
         self.oversample_ratio = 3.0
         self.importance_sample_ratio = 0.75
-        self.num_points = 12544
+        self.num_points = 8000
 
     def loss_labels(self, outputs, targets, indices, num_inst, log=False):
         """Classification loss (NLL)
@@ -223,8 +223,9 @@ class SetCriterion(nn.Module):
         src_segmentation_masks = outputs['pred_seg_mask'][idx]
         target_ctrl_points = torch.cat([t['ctrl_points'][i] for t, (_, i) in zip(targets, indices)], dim=0)
         target_segmentation_masks = torch.cat([t['segmentation_map'][i] for t, (_, i) in zip(targets, indices)], dim=0)
+        # print("target_segmentation_masks.shape",F.interpolate(target_segmentation_masks.unsqueeze(1),size=src_segmentation_masks.shape[-2:], mode="nearest").shape,F.interpolate(target_segmentation_masks.unsqueeze(1),size=src_segmentation_masks.shape[-2:], mode="nearest").squeeze(dim=1).shape)
+        target_segmentation_masks = F.interpolate(target_segmentation_masks.unsqueeze(1),size=src_segmentation_masks.shape[-2:], mode="nearest").squeeze(dim=1)
         
-        target_segmentation_masks = F.interpolate(target_segmentation_masks.unsqueeze(1),size=src_segmentation_masks.shape[-2:], mode="nearest").squeeze()
         # print(target_segmentation_masks.shape, src_segmentation_masks.shape)
 
         # n, h, w = src_segmentation_masks.shape
