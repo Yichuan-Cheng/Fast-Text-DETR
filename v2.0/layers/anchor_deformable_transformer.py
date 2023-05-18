@@ -83,6 +83,15 @@ class DeformableTransformer_Det(nn.Module):
         self.enc_output = nn.Linear(d_model, d_model)
         self.enc_output_norm = nn.LayerNorm(d_model)
 
+        self.semantic_seg_head = nn.Sequential(
+            nn.Conv2d(self.d_model, self.d_model // 4, 3, padding=1),
+            nn.BatchNorm2d(self.d_model // 4),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(self.d_model // 4, self.d_model // 4, 3, padding=1),
+            nn.BatchNorm2d(self.d_model // 4),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(self.d_model // 4, 1, 3, padding=1))
+
         # if not epqm:
         #     self.pos_trans = nn.Linear(d_model, d_model)
         #     self.pos_trans_norm = nn.LayerNorm(d_model)
@@ -225,6 +234,8 @@ class DeformableTransformer_Det(nn.Module):
             encoder_features.append(z.transpose(1, 2).reshape(bs, -1, spatial_shapes[i][0], spatial_shapes[i][1]))
         # print([tmp.shape for tmp in encoder_features])
         fused_feature = self.feature_fuse(encoder_features, one_fourth_feature)
+        semantic_seg_mask = self.semantic_seg_head(fused_feature)
+        # print(semantic_seg_mask.shape)
         # print(fused_feature.shape)
         # prepare input for decoder
         bs, _, c = memory.shape
@@ -256,7 +267,7 @@ class DeformableTransformer_Det(nn.Module):
         # print(query_embed.shape)
 
 
-        hs, inter_references, segmentation_map, anchor_point = self.decoder_new(
+        hs, inter_references, segmentation_map, anchor_point, inter_query_pos = self.decoder_new(
             query_embed,# (bs, nq,1, 256)
             reference_points, # (bs, nq,1, 2)
             memory, #(bs, map_size, 256)
@@ -270,7 +281,7 @@ class DeformableTransformer_Det(nn.Module):
         inter_references_out = inter_references
         # print(hs.shape,init_reference_out.shape,inter_references_out.shape,enc_outputs_class.shape,enc_outputs_anchor_unact.shape)
 
-        return hs, init_reference_out, inter_references_out, enc_outputs_class, enc_outputs_anchor_unact, segmentation_map, anchor_point#inter_query_pos, inter_anchor_point
+        return hs, init_reference_out, inter_references_out, enc_outputs_class, enc_outputs_anchor_unact, segmentation_map, anchor_point, inter_query_pos, semantic_seg_mask#, inter_anchor_point
 
 
 class DeformableTransformerEncoderLayer(nn.Module):
@@ -461,7 +472,7 @@ class DeformableTransformerDecoderLayer_Det(nn.Module):
             tgt = self.attn_intra(
                 q.flatten(0, 1).transpose(0, 1),
                 k.flatten(0, 1).transpose(0, 1),
-                self.with_pos_embed(tgt, query_pos).flatten(0, 1).transpose(0, 1),
+                tgt.flatten(0, 1).transpose(0, 1),
             )[0].transpose(0, 1).reshape(q.shape)
             # print((shortcut+query_pos).shape)
             tgt_circonv = self.drop_path(self.circonv(shortcut+query_pos))
@@ -531,14 +542,23 @@ class DeformableTransformerDecoder_AnchorDet(nn.Module):
         self.mask_feature_proj = None
         self.offset_embed = None
         self.query_aggregation_weights = None
-
+        # self.point_embd_norm = None
+        # self.semantic_seg_head = None
         # if epqm:
         self.ref_point_head = MLP(d_model, d_model, d_model, 2)
+        # self.query_pos_norm = None
+        # self.fused_feature_norm = nn.BatchNorm2d(d_model)
 
-    def get_reference_from_anchor(self, output, mask_features, lvl):
+    def get_reference_from_anchor(self, output, mask_features, query_pos, lvl):
         b, nq, n_ctrl, h = output.shape
-        output = self.point_embd_norm(output.reshape(b * nq, n_ctrl, h))#.reshape(b, nq, n_ctrl, h)
-        query_aggregation_weights = self.query_aggregation_weights(output.transpose(-1,-2)).reshape(b,nq,n_ctrl,1)
+
+        # Try reuse query_pos
+        # print((output + query_pos).flatten(0,1).shape)
+        # output = self.query_pos_norm((output + query_pos).flatten(0,1))
+        output = output + query_pos
+        #output = self.point_embd_norm(output.reshape(b * nq, n_ctrl, h))#.reshape(b, nq, n_ctrl, h)
+        # output = self.point_embd_norm(output + query_pos)
+        query_aggregation_weights = self.query_aggregation_weights(output.reshape(b * nq, n_ctrl, h).transpose(-1,-2)).reshape(b,nq,n_ctrl,1)
         # print(query_aggregation_weights.shape)
         output = output.reshape(b, nq, n_ctrl, h)
         aggregated_query = (output * query_aggregation_weights).sum(dim=-2)
@@ -547,7 +567,7 @@ class DeformableTransformerDecoder_AnchorDet(nn.Module):
         # print(mask_features.shape)
         # decoder_output = decoder_output.transpose(0, 1)
 
-        mask_embed = self.mask_embed(decoder_output)
+        mask_embed = self.mask_embed[lvl](aggregated_query)
         
         # corrd_offset = []
         # for i in range(self.num_ctrl_points):
@@ -570,11 +590,11 @@ class DeformableTransformerDecoder_AnchorDet(nn.Module):
         # print(pre_defined_anchor_grids, h, w)
         # print(outputs_mask.shape)
         # segmentation_map = F.softmax(outputs_mask, dim=1)
-        outputs_anchor_weights_map = F.softmax(outputs_mask.reshape(b,nq,h*w), dim=-1).reshape(b,nq,h,w).unsqueeze(-1)
+        outputs_anchor_weights_map = F.softmax(outputs_mask.reshape(b,nq,h*w) / 0.3, dim=-1).reshape(b,nq,h,w).unsqueeze(-1)
 
         # Weighted sum at the spatial dimension
         anchor_point = (pre_defined_anchor_grids.unsqueeze(0) * outputs_anchor_weights_map).sum(dim=(2,3)).detach() 
-
+        # print(anchor_point)
         # corrds_upper = anchor_point.unsqueeze(2) + (corrd_offset_upper.reshape(b,nq,self.num_ctrl_points//2,2).sigmoid() - 0.5) * 2
         # corrds_lower = anchor_point.unsqueeze(2) + (corrd_offset_lower.reshape(b,nq,self.num_ctrl_points//2,2).sigmoid() - 0.5) * 2
 
@@ -604,8 +624,21 @@ class DeformableTransformerDecoder_AnchorDet(nn.Module):
         intermediate = []
         intermediate_reference_points = []
         intermediate_query_pos = []
+        intermediate_query_pos_sin = []
         intermediate_anchor_point = []
         intermediate_segmentation_map = []
+        # b, c, h, w = fused_feature.shape
+        # # print(fused_feature.shape)
+        # # h: 1 / (h + 1) ... h / (h+1)
+        # # 1 * input_shape[-1] / (w + 1), w * input_shape[-1] / (w + 1)
+        # x, y = torch.meshgrid(torch.linspace(1 / (w + 1),w / (w + 1),w),\
+        #                       torch.linspace(1 / (h + 1),h / (h + 1),h))
+        # pre_defined_anchor_grids = torch.stack((x, y), 2).transpose(0,1).float().to(self.device)
+        # # print(pre_defined_anchor_grids.shape)
+        # pre_defined_anchor_grids = pre_defined_anchor_grids.reshape(1,1, h*w, 2)
+        # mask_pos_embd = gen_point_pos_embed(pre_defined_anchor_grids).transpose(-1,-3).reshape(1,c,h,w)
+        # fused_feature = self.fused_feature_norm(fused_feature + mask_pos_embd)
+        # print(query_pos.shape)
         for lid, layer in enumerate(self.layers):
             # reference_points: (bs, nq, 1, 2)
             # reference_points_input: (bs, nq, 1, 4, 2)
@@ -617,9 +650,17 @@ class DeformableTransformerDecoder_AnchorDet(nn.Module):
             # print(src_valid_ratios)
             # if self.epqm:
             # embed the explicit point coordinates
-            query_pos = gen_point_pos_embed(reference_points)  #  (bs, nq, 1, dim)
-            # get the positional queries
-            query_pos = self.ref_point_head(query_pos) # projection
+            query_pos_sin = gen_point_pos_embed(reference_points)  #  (bs, nq, 1, dim)
+            # intermediate_query_pos_sin.append(query_pos_sin)
+            # # # get the positional queries
+            # # # if lid == 0:
+            # # #     query_pos_proj = self.ref_point_head(query_pos_sin) # projection
+            # # # elif lid > 0:
+            # if lid > 0:
+            #     query_pos_sin = torch.stack(intermediate_query_pos_sin).mean(dim=0)
+            query_pos = self.ref_point_head(query_pos_sin)
+                #query_pos = query_pos + intermediate_query_pos[lid-1].detach()
+                # query_pos = self.query_pos_norm(query_pos)
 
 
             output = layer(
@@ -635,8 +676,8 @@ class DeformableTransformerDecoder_AnchorDet(nn.Module):
 
             # update the reference points
             # print(output.shape)
-            reference_points, anchor_point, segmentation_map = self.get_reference_from_anchor(output, fused_feature, lid)
-
+            reference_points, anchor_point, segmentation_map = self.get_reference_from_anchor(output, fused_feature, query_pos, lid)
+            # reference_points = reference_points.detach()
 
             # print(query_pos.shape)
             # if self.ctrl_point_coord is not None:
@@ -648,12 +689,12 @@ class DeformableTransformerDecoder_AnchorDet(nn.Module):
             if self.return_intermediate:
                 intermediate.append(output)
                 intermediate_reference_points.append(reference_points)
-                # intermediate_query_pos.append(query_pos)
+                intermediate_query_pos.append(query_pos)
                 intermediate_anchor_point.append(anchor_point)
                 intermediate_segmentation_map.append(segmentation_map)
 
         if self.return_intermediate:
-            return torch.stack(intermediate), torch.stack(intermediate_reference_points), torch.stack(intermediate_segmentation_map), torch.stack(intermediate_anchor_point)#, torch.stack(intermediate_query_pos)
+            return torch.stack(intermediate), torch.stack(intermediate_reference_points), torch.stack(intermediate_segmentation_map), torch.stack(intermediate_anchor_point), torch.stack(intermediate_query_pos)
 
         return output, reference_points, segmentation_map, anchor_point#query_pos
 
