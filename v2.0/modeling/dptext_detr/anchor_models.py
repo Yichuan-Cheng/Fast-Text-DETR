@@ -33,7 +33,9 @@ class DPText_DETR(nn.Module):
 
         self.epqm = cfg.MODEL.TRANSFORMER.EPQM
         self.efsa = cfg.MODEL.TRANSFORMER.EFSA
-        self.ctrl_point_embed = nn.Embedding(self.num_proposals, self.d_model)
+        self.instance_embd = nn.Embedding(100, self.d_model)
+        # self.ctrl_point_embed = nn.Embedding(16, self.d_model)
+        # self.text_semantic_embed = nn.Embedding(1, self.d_model)
 
         self.transformer = DeformableTransformer_Det(
             d_model=self.d_model,
@@ -121,6 +123,7 @@ class DPText_DETR(nn.Module):
         weight_init.c2_xavier_fill(self.mask_feature_proj)
         self.ctrl_point_class = nn.ModuleList([self.ctrl_point_class for _ in range(num_pred)])
         self.offset_embed = nn.ModuleList([self.offset_embed for _ in range(num_pred)])
+        self.mask_embed = nn.ModuleList([self.mask_embed for _ in range(num_pred)])
         # if self.epqm:
         #     self.transformer.decoder.ctrl_point_coord = self.ctrl_point_coord
         self.transformer.decoder_new.bbox_embed = None
@@ -129,7 +132,7 @@ class DPText_DETR(nn.Module):
         self.transformer.bbox_class_embed = self.bbox_class
         self.transformer.bbox_embed = self.bbox_coord
         self.decoder_norm = nn.LayerNorm(self.d_model)
-        self.point_embd_norm = nn.LayerNorm(self.d_model)
+        # self.point_embd_norm = nn.LayerNorm(self.d_model)
 
         self.transformer.decoder_new.decoder_norm = self.decoder_norm
         self.transformer.decoder_new.mask_embed = self.mask_embed
@@ -137,10 +140,14 @@ class DPText_DETR(nn.Module):
         self.transformer.decoder_new.mask_feature_proj = self.mask_feature_proj
 
         self.transformer.decoder_new.offset_embed = self.offset_embed
-        self.transformer.decoder_new.point_embd_norm = self.point_embd_norm
+        # self.transformer.decoder_new.point_embd_norm = self.point_embd_norm
         self.transformer.decoder_new.query_aggregation_weights = self.query_aggregation_weights
         # self.transformer.decoder.offset_embed_lower = self.offset_embed_lower
 
+        # self.query_pos_norm = nn.LayerNorm(self.d_model)
+        # self.transformer.decoder_new.query_pos_norm = self.query_pos_norm
+            #nn.Sigmoid())
+        # self.transformer.decoder_new.semantic_seg_head = self.semantic_seg_head
         self.to(self.device)
 
     def forward_prediction_heads(self, output, mask_features, query_pos, lvl):
@@ -177,7 +184,7 @@ class DPText_DETR(nn.Module):
         # print(outputs_mask.shape)
         # segmentation_map = F.softmax(outputs_mask, dim=1)
         segmentation_map = outputs_mask
-        outputs_anchor_weights_map = F.softmax(outputs_mask.reshape(b,nq,h*w), dim=-1).reshape(b,nq,h,w).unsqueeze(-1)
+        outputs_anchor_weights_map = F.softmax(F.softmax(outputs_mask.reshape(b,nq,h*w), dim=1), dim=-1).reshape(b,nq,h,w).unsqueeze(-1)
 
         # Weighted sum at the spatial dimension
         anchor_point = (pre_defined_anchor_grids.unsqueeze(0) * outputs_anchor_weights_map).sum(dim=(2,3)) 
@@ -202,10 +209,16 @@ class DPText_DETR(nn.Module):
         return outputs_class, anchor_point, corrds, segmentation_map#coord_offset.reshape(b,nq,-1,2).sigmoid()
 
 
-    def forward_prediction_heads_class(self, output, lvl):
+    def forward_prediction_heads_class(self, output, query_pos, lvl):
         b, nq, n_ctrl, h = output.shape
-        output = self.point_embd_norm(output.reshape(b * nq, n_ctrl, h)).reshape(b, nq, n_ctrl, h)
-        decoder_output = self.decoder_norm(output.sum(-2))
+        # output = self.query_pos_norm((output + query_pos).flatten(0,1))
+        output = output + query_pos
+        query_aggregation_weights = self.query_aggregation_weights(output.reshape(b * nq, n_ctrl, h).transpose(-1,-2)).reshape(b,nq,n_ctrl,1)
+        # print(query_aggregation_weights.shape)
+        output = output.reshape(b, nq, n_ctrl, h)
+        aggregated_query = (output * query_aggregation_weights).sum(dim=-2)
+        decoder_output = self.decoder_norm(aggregated_query)
+
         outputs_class = self.ctrl_point_class[lvl](decoder_output)
 
 
@@ -219,10 +232,9 @@ class DPText_DETR(nn.Module):
         """
         if isinstance(samples, (list, torch.Tensor)):
             samples = nested_tensor_from_tensor_list(samples)
-            
 
         input_shape = samples.tensor.shape
-        # print("input_shape",input_shape)
+        # print(input_shape)
         features, pos = self.backbone(samples)
         
         one_fourth_feature = features[0].tensors
@@ -243,7 +255,7 @@ class DPText_DETR(nn.Module):
             masks.append(mask)
             assert mask is not None
         # for i in srcs:
-            # print(i.shape)
+        #     print(i.shape)
         if self.num_feature_levels > len(srcs):
             _len_srcs = len(srcs)
             for l in range(_len_srcs, self.num_feature_levels):
@@ -257,7 +269,6 @@ class DPText_DETR(nn.Module):
                 srcs.append(src)
                 masks.append(mask)
                 pos.append(pos_l)
-                # print(src.shape,mask.shape,pos_l.shape)
         
         # Ignore one-forth faeture pos
         pos = pos[1:]
@@ -265,10 +276,10 @@ class DPText_DETR(nn.Module):
         #     print(i.shape)
         # n_pts, embed_dim --> n_q, n_pts, embed_dim
         # print([i.shape for i in masks])
-        ctrl_point_embed = self.ctrl_point_embed.weight[:, None, :]#.repeat(self.num_proposals, 1, 1)
+        ctrl_point_embed = self.instance_embd.weight[:,None,:].repeat(1, self.num_ctrl_points, 1)
 
         hs, init_reference, inter_references, enc_outputs_class, enc_outputs_coord_unact, \
-        segmentation_maps, anchor_point = self.transformer(
+        segmentation_maps, anchor_point, inter_query_pos, semantic_seg_mask = self.transformer(
             srcs, masks, pos, ctrl_point_embed, one_fourth_feature
         )
         # print(hs.shape,init_reference.shape,inter_references.shape,enc_outputs_class.shape,enc_outputs_coord_unact.shape)
@@ -282,7 +293,7 @@ class DPText_DETR(nn.Module):
         for i, output in enumerate(hs):
             # print(output.shape)
             # outputs_class, outputs_anchor, outputs_coord, segmentation_map = self.forward_prediction_heads(output, fused_feature, query_pos[i], i)
-            outputs_class = self.forward_prediction_heads_class(output, i)
+            outputs_class = self.forward_prediction_heads_class(output, inter_query_pos[i], i)
             outputs_classes.append(outputs_class)
             # outputs_anchors.append(outputs_anchor)
             # outputs_coords.append(outputs_coord)
@@ -328,7 +339,7 @@ class DPText_DETR(nn.Module):
 
         enc_outputs_coord = enc_outputs_coord_unact.sigmoid()
         out['enc_outputs'] = {'pred_logits': enc_outputs_class, 'pred_boxes': enc_outputs_coord}
-
+        out['semantic_seg_mask'] = semantic_seg_mask
         return out
 
     @torch.jit.unused
