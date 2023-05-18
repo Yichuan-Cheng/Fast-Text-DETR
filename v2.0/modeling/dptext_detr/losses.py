@@ -87,15 +87,16 @@ class SetCriterion(nn.Module):
         self.weight_dict = weight_dict
         self.enc_losses = enc_losses
         self.dec_losses = dec_losses
+        # print(dec_losses)
         self.focal_alpha = focal_alpha
         self.focal_gamma = focal_gamma
         self.num_ctrl_points = num_ctrl_points
         self.mask_weight = 5
-        self.reg_weight = 5
+        self.reg_weight = 2
         self.class_weight = 4
         self.oversample_ratio = 3.0
         self.importance_sample_ratio = 0.75
-        self.num_points = 8000
+        self.num_points = 12544
 
     def loss_labels(self, outputs, targets, indices, num_inst, log=False):
         """Classification loss (NLL)
@@ -145,6 +146,7 @@ class SetCriterion(nn.Module):
             Loss tensor
         """
         loss = F.binary_cross_entropy_with_logits(inputs, targets, reduction="none")
+        # inputs = ((inputs - 0.5)*5).sigmoid()
         # loss = F.binary_cross_entropy(inputs, targets, reduction="none")
         # print(loss.shape)
 
@@ -166,6 +168,7 @@ class SetCriterion(nn.Module):
                     (0 for the negative class and 1 for the positive class).
         """
         inputs = inputs.sigmoid()
+
         # print(inputs.max(), inputs.min())
         # inputs = inputs.flatten(1)
         # targets = targets.flatten(1)
@@ -213,6 +216,32 @@ class SetCriterion(nn.Module):
         losses['loss_giou'] = loss_giou.sum() / num_inst
         return losses
 
+    def loss_semantic_seg(self, outputs, targets, indices, num_inst):
+        target_segmentation_masks = torch.stack([v["segmentation_map"].sum(0) for v in targets])
+        # for tgt_mask in target_segmentation_masks:
+
+
+        # print(target_segmentation_masks.shape)
+        semantic_seg_mask = outputs['semantic_seg_mask']
+        target_segmentation_masks = F.interpolate(target_segmentation_masks.unsqueeze(1),size=semantic_seg_mask.shape[-2:], mode="nearest").squeeze(dim=1)
+        # target_segmentation_masks = target_segmentation_masks.sum(dim=0).flatten()
+        # print(target_segmentation_masks.max())
+        target_segmentation_masks = torch.clamp(target_segmentation_masks, 0, 1)
+        # print(target_segmentation_masks.shape, semantic_seg_mask.shape)
+        b, _, h, w = semantic_seg_mask.shape
+        # print(target_segmentation_masks.shape, semantic_seg_mask.shape)
+        loss_dice = 0
+        loss_ce = 0
+        for i in range(b):
+            # print(target_segmentation_masks.unsqueeze(0).shape, semantic_seg_mask[i].flatten().unsqueeze(0).shape)
+            loss_dice += self.dice_loss(semantic_seg_mask[i].flatten().unsqueeze(0), target_segmentation_masks[i].flatten().unsqueeze(0), 1) * self.mask_weight
+            # print(loss_dice)
+            loss_ce += self.sigmoid_ce_loss(semantic_seg_mask[i].flatten().unsqueeze(0), target_segmentation_masks[i].flatten().unsqueeze(0)) * self.mask_weight
+        loss_dice /= b
+        loss_ce /= b
+        losses = {'loss_semantic_seg_dice':loss_dice, 'loss_semantic_seg_ce':loss_ce}
+        return losses
+
     def loss_ctrl_points(self, outputs, targets, indices, num_inst):
         """Compute the losses related to the keypoint coordinates, the L1 regression loss
         """
@@ -223,10 +252,11 @@ class SetCriterion(nn.Module):
         src_segmentation_masks = outputs['pred_seg_mask'][idx]
         target_ctrl_points = torch.cat([t['ctrl_points'][i] for t, (_, i) in zip(targets, indices)], dim=0)
         target_segmentation_masks = torch.cat([t['segmentation_map'][i] for t, (_, i) in zip(targets, indices)], dim=0)
-        # print("target_segmentation_masks.shape",F.interpolate(target_segmentation_masks.unsqueeze(1),size=src_segmentation_masks.shape[-2:], mode="nearest").shape,F.interpolate(target_segmentation_masks.unsqueeze(1),size=src_segmentation_masks.shape[-2:], mode="nearest").squeeze(dim=1).shape)
-        target_segmentation_masks = F.interpolate(target_segmentation_masks.unsqueeze(1),size=src_segmentation_masks.shape[-2:], mode="nearest").squeeze(dim=1)
         
+        target_segmentation_masks = F.interpolate(target_segmentation_masks.unsqueeze(1),size=src_segmentation_masks.shape[-2:], mode="nearest").squeeze()
         # print(target_segmentation_masks.shape, src_segmentation_masks.shape)
+        if len(target_segmentation_masks.shape) == 2:
+            target_segmentation_masks = target_segmentation_masks.unsqueeze(0)
 
         # n, h, w = src_segmentation_masks.shape
         # x, y = torch.meshgrid(torch.linspace(1 / (w + 1),w / (w + 1),w),\
@@ -261,9 +291,10 @@ class SetCriterion(nn.Module):
 
         # print(point_labels.shape, point_logits.shape)
         loss_dice = self.dice_loss(point_logits, point_labels, 1) * self.mask_weight
+        # with torch.no_grad():
         loss_mask_ce = self.sigmoid_ce_loss(point_logits, point_labels) * self.mask_weight
         # print(target_anchor_points, src_anchor_points)
-        loss_ctrl_points = self.reg_weight * F.l1_loss(src_ctrl_points, target_ctrl_points, reduction='sum') / src_ctrl_points.shape[1]
+        loss_ctrl_points = self.reg_weight * F.l1_loss(src_ctrl_points, target_ctrl_points, reduction='sum') #/ src_ctrl_points.shape[1]
         # with torch.no_grad():
         # loss_anchor_points = self.reg_weight * F.l1_loss(src_anchor_points, target_anchor_points, reduction='sum')
         # print(target_anchor_points, src_anchor_points)
@@ -292,9 +323,10 @@ class SetCriterion(nn.Module):
             'labels': self.loss_labels,
             'cardinality': self.loss_cardinality,
             'ctrl_points': self.loss_ctrl_points,
+            # 'semantic': self.loss_semantic_seg,
             'boxes': self.loss_boxes,
         }
-        assert loss in loss_map, f'do you really want to compute {loss} loss?'
+        # assert loss in loss_map, f'do you really want to compute {loss} loss?'
         return loss_map[loss](outputs, targets, indices, num_inst, **kwargs)
 
     def forward(self, outputs, targets, gt_instances):
@@ -325,7 +357,8 @@ class SetCriterion(nn.Module):
         for loss in self.dec_losses:
             kwargs = {}
             losses.update(self.get_loss(loss, outputs, targets, indices, num_inst, **kwargs))
-
+        losses.update(self.loss_semantic_seg(outputs, targets, indices, num_inst, **kwargs))
+        # print(losses)
         # In case of auxiliary losses, we repeat this process with the output of each intermediate layer.
         if 'aux_outputs' in outputs:
             for i, aux_outputs in enumerate(outputs['aux_outputs']):
