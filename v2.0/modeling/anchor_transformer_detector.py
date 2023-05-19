@@ -99,8 +99,11 @@ def detector_postprocess(results, output_height, output_width):
     # scale point coordinates
     if results.has("polygons"):
         polygons = results.polygons
+        h, w = results.image_size
         polygons[:, 0::2] *= scale_x
         polygons[:, 1::2] *= scale_y
+        # polygons[:, 0::2].clamp_(min=0, max=w)
+        # polygons[:, 1::2].clamp_(min=0, max=h)
     # print(polygons[0])
 
     return results
@@ -209,9 +212,10 @@ class TransformerPureDetector(nn.Module):
             # compute the loss
             loss_dict = self.criterion(output, targets, gt_instances)
             weight_dict = self.criterion.weight_dict
-            for k in loss_dict.keys():
-                if k in weight_dict:
-                    loss_dict[k] *= weight_dict[k]
+            # for k in loss_dict.keys():
+            #     if k in weight_dict:
+            #         loss_dict[k] *= weight_dict[k]
+            # print(loss_dict)
             return loss_dict
         else:
             output = self.dptext_detr(images)
@@ -227,6 +231,7 @@ class TransformerPureDetector(nn.Module):
                 # print(height, width)
                 r = detector_postprocess(results_per_image, height, width)
                 processed_results.append({"instances": r})
+                # print(r.polygons)
             return processed_results
 
     @staticmethod
