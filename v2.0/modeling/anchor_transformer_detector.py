@@ -4,6 +4,7 @@ import torch
 from torch import nn
 import cv2
 
+from adet.modeling.dptext_detr.utils import MakeShrinkMap
 from detectron2.modeling.meta_arch.build import META_ARCH_REGISTRY
 from detectron2.modeling import build_backbone
 from detectron2.structures import ImageList, Instances
@@ -266,16 +267,20 @@ class TransformerPureDetector(nn.Module):
             gt_ctrl_points = raw_ctrl_points / \
                 torch.as_tensor([w, h], dtype=torch.float, device=self.device)[None, None, :]
             
+            make_shrink_map = MakeShrinkMap()
             instance_mask = []
             for i in range(raw_ctrl_points.shape[0]):
-                instance_mask.append(torch.from_numpy(self.draw_mask(raw_ctrl_points[i].cpu().numpy(),w,h)))
+                instance_mask.append(torch.from_numpy(make_shrink_map(raw_ctrl_points.cpu().numpy()[i], h, w)))
+            
             instance_mask = torch.stack(instance_mask, dim=0).to(self.device)
+            # cv2.imwrite('mask_test.png', instance_mask[0].cpu().numpy() * 255)
+            # print(instance_mask.shape)
             # print(instance_mask.shape, raw_ctrl_points.shape)
             # ori_image = cv2.polylines(ori_image.copy(), np.int32((gt_ctrl_points * torch.as_tensor([w, h], dtype=torch.float, \
             #                 device=self.device)[None, None, :]).cpu().numpy()), thickness=2, isClosed=True, color=(255,0,0))
             # cv2.imwrite('example.jpg', ori_image)
             # print(gt_ctrl_points.shape)
-            anchor_points = gt_ctrl_points.mean(dim=1)
+            # anchor_points = gt_ctrl_points.mean(dim=1)
             gt_ctrl_points = torch.clamp(gt_ctrl_points[:, :, :2], 0, 1)
             new_targets.append(
                 {"labels": gt_classes, "boxes": gt_boxes,
